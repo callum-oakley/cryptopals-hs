@@ -1,0 +1,9 @@
+name: cryptopals
+version: 0.0.0.1
+cabal-version: >= 1.2
+build-type: Simple
+
+executable experiments
+  main-is: Main.hs
+  ghc-options: -Wall -fno-warn-missing-methods -fno-warn-type-defaults
+  build-depends: base, bytestring, split, HUnit
