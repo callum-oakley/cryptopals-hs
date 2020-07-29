@@ -1,6 +1,7 @@
 {-# LANGUAGE LambdaCase        #-}
 {-# LANGUAGE OverloadedStrings #-}
 
+import           Control.Monad         (replicateM_, when)
 import           Data.Bits             (Bits, popCount, shiftL, shiftR, testBit,
                                         xor, (.&.))
 import           Data.ByteString       (ByteString)
@@ -10,15 +11,23 @@ import           Data.Char             (digitToInt, intToDigit, ord)
 import           Data.Foldable         (foldlM)
 import           Data.List             (elemIndex, maximumBy, minimumBy, nub,
                                         unfoldr)
-import           Data.List.Split       (chunksOf)
-import           Data.Maybe            (fromJust)
+import           Data.Maybe            (fromJust, isJust)
 import           Data.Ord              (comparing)
 import           Data.Word             (Word8)
 import           OpenSSL.Cipher        (Mode (..), aesCBC, newAESCtx)
+import           OpenSSL.Random        (randBytes)
+import           System.Random         (Random, random, randomIO, randomRIO)
 import           Test.HUnit
 
 -- Set 1 • Challenge 1 • Convert hex to base64
 --------------------------------------------------------------------------------
+chunksOf :: Int -> [a] -> [[a]]
+chunksOf n =
+  unfoldr
+    (\case
+       [] -> Nothing
+       x -> Just $ splitAt n x)
+
 decodeHex :: ByteString -> ByteString
 decodeHex =
   B.pack .
@@ -391,6 +400,86 @@ challenge10 =
       decryptCBC "YELLOW SUBMARINE" (B.pack $ replicate 16 0) ciphertext
     plaintext @?= playThatFunkyMusic
 
+-- Set 2 • Challenge 11 • An ECB/CBC detection oracle
+--------------------------------------------------------------------------------
+data ModeOfOperation
+  = ECB
+  | CBC
+  deriving (Eq, Ord, Show)
+
+instance Random ModeOfOperation where
+  random g
+    | b = (ECB, g')
+    | otherwise = (CBC, g')
+    where
+      (b, g') = random g
+
+oracle11 :: ModeOfOperation -> ByteString -> IO ByteString
+oracle11 mode plaintext = do
+  key <- randBytes 16
+  prefix <- randBytes =<< randomRIO (5, 10)
+  suffix <- randBytes =<< randomRIO (5, 10)
+  case mode of
+    ECB -> encryptECB key (prefix <> plaintext <> suffix)
+    CBC -> do
+      iv <- randBytes 16
+      encryptCBC key iv (prefix <> plaintext <> suffix)
+
+-- If we feed the oracle three blocks of 0s, then after up to a whole block of
+-- padding, the second and third block of plaintext will still be all 0s, and
+-- thus under ECB will produce the same ciphertext.
+detectMode :: (ByteString -> IO ByteString) -> IO ModeOfOperation
+detectMode oracle = do
+  ciphertext <- oracle . B.pack $ replicate 48 0
+  let blocks = blocksOf 16 ciphertext
+  if blocks !! 1 == blocks !! 2
+    then return ECB
+    else return CBC
+
+challenge11 :: Test
+challenge11 =
+  TestCase . replicateM_ 100 $ do
+    mode <- randomIO
+    detectedMode <- detectMode $ oracle11 mode
+    detectedMode @?= mode
+
+-- Set 2 • Challenge 12 • Byte-at-a-time ECB decryption (Simple)
+--------------------------------------------------------------------------------
+breakECBSimple :: (ByteString -> IO ByteString) -> IO ByteString
+breakECBSimple oracle = do
+  blockSize <- detectBlockSize 0 Nothing
+  when (blockSize /= 16) (fail "expected block size of 16")
+  mode <- detectMode oracle
+  when (mode /= ECB) (fail "expected ECB")
+  undefined -- TODO
+  where
+    detectBlockSize n lastSize = do
+      size <- fmap B.length . oracle . B.pack $ replicate n 0
+      if isJust lastSize && Just size /= lastSize
+        then return $ size - fromJust lastSize
+        else detectBlockSize (n + 1) (Just size)
+
+challenge12 :: Test
+challenge12 =
+  TestCase $ do
+    let secret =
+          decodeBase64 $
+          "Um9sbGluJyBpbiBteSA1LjAKV2l0aCBteSByYWctdG9wIG" <>
+          "Rvd24gc28gbXkgaGFpciBjYW4gYmxvdwpUaGUgZ2lybGll" <>
+          "cyBvbiBzdGFuZGJ5IHdhdmluZyBqdXN0IHRvIHNheSBoaQ" <>
+          "pEaWQgeW91IHN0b3A/IE5vLCBJIGp1c3QgZHJvdmUgYnkK"
+    key <- randBytes 16
+    brokenSecret <-
+      breakECBSimple $ \plaintext -> encryptECB key (plaintext <> secret)
+    brokenSecret @?= secret
+    brokenSecret @?=
+      C.unlines
+        [ "Rollin' in my 5.0"
+        , "With my rag-top down so my hair can blow"
+        , "The girlies on standby waving just to say hi"
+        , "Did you stop? No, I just drove by"
+        ]
+
 --------------------------------------------------------------------------------
 main :: IO ()
 main = do
@@ -409,5 +498,7 @@ main = do
       , challenge8
       , challenge9
       , challenge10
+      , challenge11
+      , challenge12
       ]
   return ()
