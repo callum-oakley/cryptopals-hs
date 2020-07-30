@@ -1,7 +1,8 @@
 {-# LANGUAGE LambdaCase        #-}
 {-# LANGUAGE OverloadedStrings #-}
 
-import           Control.Monad         (replicateM_, when)
+import           Control.Applicative   (liftA2)
+import           Control.Monad         (replicateM_, unless, when)
 import           Data.Bits             (Bits, popCount, shiftL, shiftR, testBit,
                                         xor, (.&.))
 import           Data.ByteString       (ByteString)
@@ -445,19 +446,59 @@ challenge11 =
 
 -- Set 2 • Challenge 12 • Byte-at-a-time ECB decryption (Simple)
 --------------------------------------------------------------------------------
+findM :: (Monad m, Foldable f) => (a -> m Bool) -> f a -> m (Maybe a)
+findM p = foldr go (return Nothing)
+  where
+    go x acc = do
+      b <- p x
+      if b
+        then return $ Just x
+        else acc
+
 breakECBSimple :: (ByteString -> IO ByteString) -> IO ByteString
 breakECBSimple oracle = do
   blockSize <- detectBlockSize 0 Nothing
-  when (blockSize /= 16) (fail "expected block size of 16")
+  when (blockSize /= 16) $ fail "expected block size of 16"
   mode <- detectMode oracle
-  when (mode /= ECB) (fail "expected ECB")
-  undefined -- TODO
+  when (mode /= ECB) $ fail "expected ECB"
+  ciphertextLength <- B.length <$> oracle ""
+  go ciphertextLength ""
   where
     detectBlockSize n lastSize = do
       size <- fmap B.length . oracle . B.pack $ replicate n 0
       if isJust lastSize && Just size /= lastSize
         then return $ size - fromJust lastSize
         else detectBlockSize (n + 1) (Just size)
+    go ciphertextLength plaintext
+      | B.length plaintext == ciphertextLength = return plaintext
+      | otherwise = do
+        let padding =
+              B.pack $ replicate (ciphertextLength - B.length plaintext - 1) 0
+        image <- fmap (B.take ciphertextLength) . oracle $ padding
+        preimage <-
+          findM
+            (fmap ((== image) . B.take ciphertextLength) .
+             oracle . B.snoc (padding <> plaintext))
+            [0 .. 255]
+        case preimage of
+          Just preimage' -> go ciphertextLength (B.snoc plaintext preimage')
+          Nothing
+            -- There's no preimage which indicates that we've finished breaking
+            -- the secret, and the oracle is now appending padding bytes which
+            -- are changing beneath us. If this is true, the last byte we added
+            -- will have been 1 (for one byte of padding) and now will have
+            -- changed to 2. Let's make some assertions to confirm our
+            -- understanding of the situation and then we're done.
+           -> do
+            when (B.last plaintext /= 1) $ fail "expected 1 byte of padding"
+            prediction <-
+              liftA2
+                (==)
+                (fmap (B.take ciphertextLength) . oracle $
+                 padding <> B.take (B.length plaintext - 1) plaintext <> "\2\2")
+                (oracle padding)
+            unless prediction $ fail "expected padding prediction to hold"
+            return $ B.take (B.length plaintext - 1) plaintext
 
 challenge12 :: Test
 challenge12 =
