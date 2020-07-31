@@ -2,7 +2,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 import           Control.Applicative   (liftA2)
-import           Control.Monad         (replicateM_, unless, when)
+import           Control.Monad         (replicateM_, unless, void, when)
 import           Data.Bits             (Bits, popCount, shiftL, shiftR, testBit,
                                         xor, (.&.))
 import           Data.ByteString       (ByteString)
@@ -543,24 +543,35 @@ challenge12 =
 
 -- Set 2 • Challenge 13 • ECB cut-and-paste
 --------------------------------------------------------------------------------
-decodeKeyValue :: ByteString -> [(ByteString, ByteString)]
-decodeKeyValue = map ((\[k, v] -> (k, v)) . C.split '=') . C.split '&'
+decodeKeyValue :: Char -> ByteString -> [(ByteString, ByteString)]
+decodeKeyValue sep = map ((\[k, v] -> (k, v)) . C.split '=') . C.split sep
 
-encodeKeyValue :: [(ByteString, ByteString)] -> ByteString
-encodeKeyValue =
-  B.intercalate "&" . map (\(k, v) -> sanitise k <> "=" <> sanitise v)
-  where
-    sanitise = C.filter (\c -> c /= '=' && c /= '&')
+-- Only encodes '&', ';', and '=' since that's all we need for the problems.
+-- Encodings taken from https://en.wikipedia.org/wiki/Percent-encoding.
+percentEncode :: ByteString -> ByteString
+percentEncode =
+  C.concatMap
+    (\case
+       '&' -> "%26"
+       ';' -> "%3B"
+       '=' -> "%3D"
+       c -> C.pack [c])
+
+-- sep should be one of '&' or ';' so that it is properly escaped.
+encodeKeyValue :: Char -> [(ByteString, ByteString)] -> ByteString
+encodeKeyValue sep =
+  B.intercalate (C.pack [sep]) .
+  map (\(k, v) -> percentEncode k <> "=" <> percentEncode v)
 
 testKeyValue :: Test
 testKeyValue =
   TestCase $ do
-    decodeKeyValue "foo=bar&baz=qux&zap=zazzle" @?=
+    decodeKeyValue '&' "foo=bar&baz=qux&zap=zazzle" @?=
       [("foo", "bar"), ("baz", "qux"), ("zap", "zazzle")]
-    encodeKeyValue [("foo", "bar"), ("baz", "qux"), ("zap", "zazzle")] @?=
+    encodeKeyValue '&' [("foo", "bar"), ("baz", "qux"), ("zap", "zazzle")] @?=
       "foo=bar&baz=qux&zap=zazzle"
-    encodeKeyValue [("em&=ail", "foo@bar&role=admin")] @?=
-      "email=foo@barroleadmin"
+    encodeKeyValue '&' [("em&=ail", "foo@bar&role=admin")] @?=
+      "em%26%3Dail=foo@bar%26role%3Dadmin"
 
 -- Feed the oracle an email which will result in it encryping two blocks which
 -- look like:
@@ -573,8 +584,8 @@ testKeyValue =
 --     "email=<padding>" "<padding>&uid=10&role=" "user<padding>"
 --
 -- Now we can swap out the last block of ciphertext for our fake admin block.
-spoofAdminToken :: (ByteString -> IO ByteString) -> IO ByteString
-spoofAdminToken oracle = do
+spoofAdminTokenECB :: (ByteString -> IO ByteString) -> IO ByteString
+spoofAdminTokenECB oracle = do
   fakeAdminBlock <-
     fmap ((!! 1) . blocksOf 16) . oracle $
     pad (16 - B.length "email=") 'X' <> padPKCS7 16 "admin"
@@ -589,11 +600,13 @@ challenge13 =
   TestCase $ do
     key <- randBytes 16
     adminToken <-
-      spoofAdminToken $ \email ->
+      spoofAdminTokenECB $ \email ->
         encryptECB
           key
-          (encodeKeyValue [("email", email), ("uid", "10"), ("role", "user")])
-    adminProfile <- decodeKeyValue <$> decryptECB key adminToken
+          (encodeKeyValue
+             '&'
+             [("email", email), ("uid", "10"), ("role", "user")])
+    adminProfile <- decodeKeyValue '&' <$> decryptECB key adminToken
     adminProfile @?=
       [("email", "XXXXXXXXXXXXX"), ("uid", "10"), ("role", "admin")]
 
@@ -676,30 +689,65 @@ challenge15 =
     unpadPKCS7 "ICE ICE BABY\x05\x05\x05\x05" @?= Left InvalidPaddingError
     unpadPKCS7 "ICE ICE BABY\x01\x02\x03\x04" @?= Left InvalidPaddingError
 
+-- Set 3 • Challenge 16 • CBC bitflipping attacks
+--------------------------------------------------------------------------------
+isAdmin :: ByteString -> ByteString -> ByteString -> IO Bool
+isAdmin key iv =
+  fmap (elem ("admin", "true") . decodeKeyValue ';') . decryptCBC key iv
+
+-- Choose userdata so that our plaintext looks like
+--
+--     "comment1=cooking" "%20MCs;userdata=" "XXXXXXXXXXXXXXXX"
+--     "XXXXXXXXXXXXXXXX" ";comment2=%20lik" "e%20a%20pound%20"
+--     "of%20bacon"
+--
+-- Then we can flip bits in the third block of ciphertext to produce the
+-- desired change in the fourth block of plaintext. The oracle should only be
+-- called once in this function.
+spoofAdminTokenCBC :: (ByteString -> IO ByteString) -> IO ByteString
+spoofAdminTokenCBC oracle = do
+  let userdata = C.pack $ replicate 32 'X'
+  (t0:t1:t2:ts) <- blocksOf 16 <$> oracle userdata
+  return . B.concat $
+    t0 : t1 : t2 .+. "XXXXXXXXXXXXXXXX" .+. "XXXXX;admin=true" : ts
+
+challenge16 :: Test
+challenge16 =
+  TestCase $ do
+    key <- randBytes 16
+    iv <- randBytes 16
+    adminToken <-
+      spoofAdminTokenCBC
+        (\userdata ->
+           encryptCBC key iv $
+           "comment1=cooking%20MCs;userdata=" <>
+           userdata <> ";comment2=%20like%20a%20pound%20of%20bacon")
+    a <- isAdmin key iv adminToken
+    a @?= True
+
 --------------------------------------------------------------------------------
 main :: IO ()
-main = do
-  _ <-
-    runTestTT $
-    TestList
-      [ testBase64Padding
-      , testHammingDistance
-      , testKeyValue
-      , testDetectPrefixLength
-      , challenge1
-      , challenge2
-      , challenge3
-      , challenge4
-      , challenge5
-      , challenge6
-      , challenge7
-      , challenge8
-      , challenge9
-      , challenge10
-      , challenge11
-      , challenge12
-      , challenge13
-      , challenge14
-      , challenge15
-      ]
-  return ()
+main =
+  void . runTestTT $
+  TestList
+    [ testBase64Padding
+    , testHammingDistance
+    , testKeyValue
+    , testDetectPrefixLength
+    , challenge1
+    , challenge2
+    , challenge3
+    , challenge4
+    , challenge5
+    , challenge6
+    , challenge7
+    , challenge8
+    , challenge9
+    , challenge10
+    , challenge11
+    , challenge12
+    , challenge13
+    , challenge14
+    , challenge15
+    , challenge16
+    ]
