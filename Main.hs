@@ -483,12 +483,12 @@ breakECBSimple oracle = do
         case preimage of
           Just preimage' -> go ciphertextLength (B.snoc plaintext preimage')
           Nothing
-            -- There's no preimage which indicates that we've finished breaking
-            -- the secret, and the oracle is now appending padding bytes which
-            -- are changing beneath us. If this is true, the last byte we added
-            -- will have been 1 (for one byte of padding) and now will have
-            -- changed to 2. Let's make some assertions to confirm our
-            -- understanding of the situation and then we're done.
+            -- There's no preimage, which indicates that we've finished
+            -- breaking the secret, and the oracle is now appending padding
+            -- bytes which are changing beneath us. If this is true, the last
+            -- byte we added will have been 1 (for one byte of padding) and now
+            -- will have changed to 2. Let's make some assertions to confirm
+            -- our understanding of the situation and then we're done.
            -> do
             when (B.last plaintext /= 1) $ fail "expected 1 byte of padding"
             prediction <-
@@ -521,6 +521,62 @@ challenge12 =
         , "Did you stop? No, I just drove by"
         ]
 
+-- Set 2 • Challenge 13 • ECB cut-and-paste
+--------------------------------------------------------------------------------
+decodeKeyValue :: ByteString -> [(ByteString, ByteString)]
+decodeKeyValue = map ((\[k, v] -> (k, v)) . C.split '=') . C.split '&'
+
+encodeKeyValue :: [(ByteString, ByteString)] -> ByteString
+encodeKeyValue =
+  B.intercalate "&" . map (\(k, v) -> sanitise k <> "=" <> sanitise v)
+  where
+    sanitise = C.filter (\c -> c /= '=' && c /= '&')
+
+testKeyValue :: Test
+testKeyValue =
+  TestCase $ do
+    decodeKeyValue "foo=bar&baz=qux&zap=zazzle" @?=
+      [("foo", "bar"), ("baz", "qux"), ("zap", "zazzle")]
+    encodeKeyValue [("foo", "bar"), ("baz", "qux"), ("zap", "zazzle")] @?=
+      "foo=bar&baz=qux&zap=zazzle"
+    encodeKeyValue [("em&=ail", "foo@bar&role=admin")] @?=
+      "email=foo@barroleadmin"
+
+-- Feed the oracle an email which will result in it encryping two blocks which
+-- look like:
+--
+--     "email=<padding>" "admin<padding>" <other stuff we don't care about>
+--
+-- Now feed an email which causes the role value to appear at the start of the
+-- third block.
+--
+--     "email=<padding>" "<padding>&uid=10&role=" "user<padding>"
+--
+-- Now we can swap out the last block of ciphertext for our fake admin block.
+spoofAdminToken :: (ByteString -> IO ByteString) -> IO ByteString
+spoofAdminToken oracle = do
+  fakeAdminBlock <-
+    fmap ((!! 1) . blocksOf 16) . oracle $
+    pad (16 - B.length "email=") 'X' <> padPKCS7 16 "admin"
+  userToken <-
+    oracle $ pad (32 - B.length "email=" - B.length "&uid=10&role=") 'X'
+  return $ (B.take 32 userToken) <> fakeAdminBlock
+  where
+    pad n c = C.pack $ replicate n c
+
+challenge13 :: Test
+challenge13 =
+  TestCase $ do
+    key <- randBytes 16
+    adminToken <-
+      spoofAdminToken $ \email ->
+        encryptECB
+          key
+          (encodeKeyValue [("email", email), ("uid", "10"), ("role", "user")])
+    adminProfile <- decodeKeyValue <$> decryptECB key adminToken
+    adminProfile @?=
+      [("email", "XXXXXXXXXXXXX"), ("uid", "10"), ("role", "admin")]
+
 --------------------------------------------------------------------------------
 main :: IO ()
 main = do
@@ -529,6 +585,7 @@ main = do
     TestList
       [ testBase64Padding
       , testHammingDistance
+      , testKeyValue
       , challenge1
       , challenge2
       , challenge3
@@ -541,5 +598,6 @@ main = do
       , challenge10
       , challenge11
       , challenge12
+      , challenge13
       ]
   return ()
