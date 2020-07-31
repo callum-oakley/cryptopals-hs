@@ -326,7 +326,8 @@ encryptECB key = foldlM step "" . blocksOf 16 . padPKCS7 16
       return $ ciphertext <> c
 
 decryptECB :: ByteString -> ByteString -> IO ByteString
-decryptECB key = fmap unpadPKCS7 . foldlM step "" . blocksOf 16
+decryptECB key =
+  (failOnLeft =<<) . fmap unpadPKCS7 . foldlM step "" . blocksOf 16
   where
     step plaintext block = do
       p <- blockCipher Decrypt key block
@@ -369,8 +370,23 @@ padPKCS7 blockSize text = text <> B.pack (replicate n $ fromIntegral n)
   where
     n = blockSize - B.length text `mod` blockSize
 
-unpadPKCS7 :: ByteString -> ByteString
-unpadPKCS7 text = B.take (B.length text - fromIntegral (B.last text)) text
+data InvalidPaddingError =
+  InvalidPaddingError
+  deriving (Eq, Ord, Show)
+
+unpadPKCS7 :: ByteString -> Either InvalidPaddingError ByteString
+unpadPKCS7 text
+  | isValid = Right $ B.take (B.length text - padLength) text
+  | otherwise = Left InvalidPaddingError
+  where
+    padLength = fromIntegral $ B.last text
+    isValid =
+      B.drop (B.length text - padLength) text ==
+      B.pack (replicate padLength (fromIntegral padLength))
+
+failOnLeft :: Show e => Either e a -> IO a
+failOnLeft (Left err) = fail $ show err
+failOnLeft (Right x)  = return x
 
 challenge9 :: Test
 challenge9 =
@@ -387,7 +403,9 @@ encryptCBC key iv = fmap fst . foldlM step ("", iv) . blocksOf 16 . padPKCS7 16
       return (ciphertext <> block', block')
 
 decryptCBC :: ByteString -> ByteString -> ByteString -> IO ByteString
-decryptCBC key iv = fmap (unpadPKCS7 . fst) . foldlM step ("", iv) . blocksOf 16
+decryptCBC key iv =
+  (failOnLeft =<<) .
+  fmap (unpadPKCS7 . fst) . foldlM step ("", iv) . blocksOf 16
   where
     step (plaintext, chained) block = do
       block' <- blockCipher Decrypt key block
@@ -562,7 +580,7 @@ spoofAdminToken oracle = do
     pad (16 - B.length "email=") 'X' <> padPKCS7 16 "admin"
   userToken <-
     oracle $ pad (32 - B.length "email=" - B.length "&uid=10&role=") 'X'
-  return $ (B.take 32 userToken) <> fakeAdminBlock
+  return $ B.take 32 userToken <> fakeAdminBlock
   where
     pad n c = C.pack $ replicate n c
 
@@ -593,10 +611,10 @@ detectPrefixLength oracle = do
   go initialResponse 1
   where
     stimulate n =
-      fmap (fst . fromJust . find snd . zip [0 ..]) $
+      fst . fromJust . find snd . zip [0 ..] <$>
       (liftA2 $ zipWith (/=))
-        (fmap (blocksOf 16) . oracle $ pad n <> "\0")
-        (fmap (blocksOf 16) . oracle $ pad n <> "\1")
+        (fmap (blocksOf 16) . oracle $ pad n <> "0")
+        (fmap (blocksOf 16) . oracle $ pad n <> "1")
     pad n = B.pack $ replicate n 0
     go initialResponse n = do
       response <- stimulate n
@@ -621,8 +639,8 @@ breakECBHarder oracle = do
   prefixLength <- detectPrefixLength oracle
   let prefixPaddingLength = 16 - prefixLength `mod` 16
   breakECBSimple $ \plaintext ->
-    (B.drop $ prefixLength + prefixPaddingLength) <$>
-    oracle ((B.pack $ replicate prefixPaddingLength 0) <> plaintext)
+    B.drop (prefixLength + prefixPaddingLength) <$>
+    oracle (B.pack (replicate prefixPaddingLength 0) <> plaintext)
 
 challenge14 :: Test
 challenge14 =
@@ -649,6 +667,15 @@ challenge14 =
         , "Did you stop? No, I just drove by"
         ]
 
+-- Set 2 • Challenge 15 • PKCS#7 padding validation
+--------------------------------------------------------------------------------
+challenge15 :: Test
+challenge15 =
+  TestCase $ do
+    unpadPKCS7 "ICE ICE BABY\x04\x04\x04\x04" @?= Right "ICE ICE BABY"
+    unpadPKCS7 "ICE ICE BABY\x05\x05\x05\x05" @?= Left InvalidPaddingError
+    unpadPKCS7 "ICE ICE BABY\x01\x02\x03\x04" @?= Left InvalidPaddingError
+
 --------------------------------------------------------------------------------
 main :: IO ()
 main = do
@@ -673,5 +700,6 @@ main = do
       , challenge12
       , challenge13
       , challenge14
+      , challenge15
       ]
   return ()
