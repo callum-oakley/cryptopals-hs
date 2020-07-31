@@ -10,8 +10,8 @@ import qualified Data.ByteString       as B
 import qualified Data.ByteString.Char8 as C
 import           Data.Char             (digitToInt, intToDigit, ord)
 import           Data.Foldable         (foldlM)
-import           Data.List             (elemIndex, maximumBy, minimumBy, nub,
-                                        unfoldr)
+import           Data.List             (elemIndex, find, maximumBy, minimumBy,
+                                        nub, unfoldr)
 import           Data.Maybe            (fromJust, isJust)
 import           Data.Ord              (comparing)
 import           Data.Word             (Word8)
@@ -455,20 +455,22 @@ findM p = foldr go (return Nothing)
         then return $ Just x
         else acc
 
+detectBlockSize :: (ByteString -> IO ByteString) -> Int -> Maybe Int -> IO Int
+detectBlockSize oracle n lastSize = do
+  size <- fmap B.length . oracle . B.pack $ replicate n 0
+  if isJust lastSize && Just size /= lastSize
+    then return $ size - fromJust lastSize
+    else detectBlockSize oracle (n + 1) (Just size)
+
 breakECBSimple :: (ByteString -> IO ByteString) -> IO ByteString
 breakECBSimple oracle = do
-  blockSize <- detectBlockSize 0 Nothing
+  blockSize <- detectBlockSize oracle 0 Nothing
   when (blockSize /= 16) $ fail "expected block size of 16"
   mode <- detectMode oracle
   when (mode /= ECB) $ fail "expected ECB"
   ciphertextLength <- B.length <$> oracle ""
   go ciphertextLength ""
   where
-    detectBlockSize n lastSize = do
-      size <- fmap B.length . oracle . B.pack $ replicate n 0
-      if isJust lastSize && Just size /= lastSize
-        then return $ size - fromJust lastSize
-        else detectBlockSize (n + 1) (Just size)
     go ciphertextLength plaintext
       | B.length plaintext == ciphertextLength = return plaintext
       | otherwise = do
@@ -577,6 +579,76 @@ challenge13 =
     adminProfile @?=
       [("email", "XXXXXXXXXXXXX"), ("uid", "10"), ("role", "admin")]
 
+-- Set 2 • Challenge 14 • Byte-at-a-time ECB decryption (Harder)
+--------------------------------------------------------------------------------
+-- Detect the prefix length by feeding input to the cipher which differs in
+-- exactly one byte and comparing the indices of the blocks which differ in the
+-- ciphertext. The initial response indicates the block that the padding ends
+-- in, and then by shifting the differing bit progressively further to the
+-- right we can see how far we have to move it to effect change in the next
+-- block, and thus how much of the last block the padding occupies.
+detectPrefixLength :: (ByteString -> IO ByteString) -> IO Int
+detectPrefixLength oracle = do
+  initialResponse <- stimulate 0
+  go initialResponse 1
+  where
+    stimulate n =
+      fmap (fst . fromJust . find snd . zip [0 ..]) $
+      (liftA2 $ zipWith (/=))
+        (fmap (blocksOf 16) . oracle $ pad n <> "\0")
+        (fmap (blocksOf 16) . oracle $ pad n <> "\1")
+    pad n = B.pack $ replicate n 0
+    go initialResponse n = do
+      response <- stimulate n
+      if response /= initialResponse
+        then return $ response * 16 - n
+        else go initialResponse (n + 1)
+
+testDetectPrefixLength :: Test
+testDetectPrefixLength =
+  TestCase . replicateM_ 100 $ do
+    key <- randBytes 16
+    prefix <- randBytes =<< randomRIO (0, 256)
+    prefixLength <-
+      detectPrefixLength $ \plaintext -> encryptECB key (prefix <> plaintext)
+    prefixLength @?= B.length prefix
+
+-- Once we've detected the prefix length we can pad the prefix up to a whole
+-- number of blocks, drop them from the ciphertext and proceed as in
+-- breakECBSimple.
+breakECBHarder :: (ByteString -> IO ByteString) -> IO ByteString
+breakECBHarder oracle = do
+  prefixLength <- detectPrefixLength oracle
+  let prefixPaddingLength = 16 - prefixLength `mod` 16
+  breakECBSimple $ \plaintext ->
+    (B.drop $ prefixLength + prefixPaddingLength) <$>
+    oracle ((B.pack $ replicate prefixPaddingLength 0) <> plaintext)
+
+challenge14 :: Test
+challenge14 =
+  TestCase $ do
+    let secret =
+          decodeBase64 $
+          "Um9sbGluJyBpbiBteSA1LjAKV2l0aCBteSByYWctdG9wIG" <>
+          "Rvd24gc28gbXkgaGFpciBjYW4gYmxvdwpUaGUgZ2lybGll" <>
+          "cyBvbiBzdGFuZGJ5IHdhdmluZyBqdXN0IHRvIHNheSBoaQ" <>
+          "pEaWQgeW91IHN0b3A/IE5vLCBJIGp1c3QgZHJvdmUgYnkK"
+    key <- randBytes 16
+    -- The problem doesn't state a range for number of bytes, so I'm going to
+    -- err on the side of "lots".
+    prefix <- randBytes =<< randomRIO (0, 256)
+    brokenSecret <-
+      breakECBHarder $ \plaintext ->
+        encryptECB key (prefix <> plaintext <> secret)
+    brokenSecret @?= secret
+    brokenSecret @?=
+      C.unlines
+        [ "Rollin' in my 5.0"
+        , "With my rag-top down so my hair can blow"
+        , "The girlies on standby waving just to say hi"
+        , "Did you stop? No, I just drove by"
+        ]
+
 --------------------------------------------------------------------------------
 main :: IO ()
 main = do
@@ -586,6 +658,7 @@ main = do
       [ testBase64Padding
       , testHammingDistance
       , testKeyValue
+      , testDetectPrefixLength
       , challenge1
       , challenge2
       , challenge3
@@ -599,5 +672,6 @@ main = do
       , challenge11
       , challenge12
       , challenge13
+      , challenge14
       ]
   return ()
