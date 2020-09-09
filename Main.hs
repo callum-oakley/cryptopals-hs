@@ -9,6 +9,7 @@ import           Data.ByteString       (ByteString)
 import qualified Data.ByteString       as B
 import qualified Data.ByteString.Char8 as C
 import           Data.Char             (digitToInt, intToDigit, ord)
+import           Data.Either           (isRight)
 import           Data.Foldable         (foldlM)
 import           Data.List             (elemIndex, find, maximumBy, minimumBy,
                                         nub, unfoldr)
@@ -95,7 +96,11 @@ challenge1 = TestCase $ (encodeBase64 . decodeHex $ hex) @?= base64
 -- Set 1 • Challenge 2 • Fixed XOR
 --------------------------------------------------------------------------------
 (.+.) :: ByteString -> ByteString -> ByteString
-a .+. b = B.pack $ zipWith xor (B.unpack a) (B.unpack b)
+a .+. b
+  | B.length a >= B.length b = B.pack $ zipWith xor (B.unpack a) (B.unpack b')
+  | otherwise = b .+. a
+  where
+    b' = (B.pack $ replicate (B.length a - B.length b) 0) <> b
 
 challenge2 :: Test
 challenge2 =
@@ -155,7 +160,8 @@ challenge4 =
 encryptRepeatingKeyXOR :: ByteString -> ByteString -> ByteString
 encryptRepeatingKeyXOR key plaintext =
   plaintext .+.
-  mconcat (replicate (B.length plaintext `div` B.length key + 1) key)
+  (B.take (B.length plaintext) $
+   mconcat (replicate (B.length plaintext `div` B.length key + 1) key))
 
 challenge5 :: Test
 challenge5 =
@@ -325,9 +331,9 @@ encryptECB key = foldlM step "" . blocksOf 16 . padPKCS7 16
       c <- blockCipher Encrypt key block
       return $ ciphertext <> c
 
-decryptECB :: ByteString -> ByteString -> IO ByteString
-decryptECB key =
-  (failOnLeft =<<) . fmap unpadPKCS7 . foldlM step "" . blocksOf 16
+decryptECB ::
+     ByteString -> ByteString -> IO (Either InvalidPaddingError ByteString)
+decryptECB key = fmap unpadPKCS7 . foldlM step "" . blocksOf 16
   where
     step plaintext block = do
       p <- blockCipher Decrypt key block
@@ -337,7 +343,7 @@ challenge7 :: Test
 challenge7 =
   TestCase $ do
     ciphertext <- decodeBase64 <$> B.readFile "data/7.txt"
-    plaintext <- decryptECB "YELLOW SUBMARINE" ciphertext
+    Right plaintext <- decryptECB "YELLOW SUBMARINE" ciphertext
     plaintext @?= playThatFunkyMusic
 
 -- Set 1 • Challenge 8 • Detect AES in ECB mode
@@ -384,10 +390,6 @@ unpadPKCS7 text
       B.drop (B.length text - padLength) text ==
       B.pack (replicate padLength (fromIntegral padLength))
 
-failOnLeft :: Show e => Either e a -> IO a
-failOnLeft (Left err) = fail $ show err
-failOnLeft (Right x)  = return x
-
 challenge9 :: Test
 challenge9 =
   TestCase $
@@ -402,10 +404,12 @@ encryptCBC key iv = fmap fst . foldlM step ("", iv) . blocksOf 16 . padPKCS7 16
       block' <- blockCipher Encrypt key (block .+. chained)
       return (ciphertext <> block', block')
 
-decryptCBC :: ByteString -> ByteString -> ByteString -> IO ByteString
-decryptCBC key iv =
-  (failOnLeft =<<) .
-  fmap (unpadPKCS7 . fst) . foldlM step ("", iv) . blocksOf 16
+decryptCBC ::
+     ByteString
+  -> ByteString
+  -> ByteString
+  -> IO (Either InvalidPaddingError ByteString)
+decryptCBC key iv = fmap (unpadPKCS7 . fst) . foldlM step ("", iv) . blocksOf 16
   where
     step (plaintext, chained) block = do
       block' <- blockCipher Decrypt key block
@@ -415,7 +419,7 @@ challenge10 :: Test
 challenge10 =
   TestCase $ do
     ciphertext <- decodeBase64 <$> B.readFile "data/10.txt"
-    plaintext <-
+    Right plaintext <-
       decryptCBC "YELLOW SUBMARINE" (B.pack $ replicate 16 0) ciphertext
     plaintext @?= playThatFunkyMusic
 
@@ -606,7 +610,8 @@ challenge13 =
           (encodeKeyValue
              '&'
              [("email", email), ("uid", "10"), ("role", "user")])
-    adminProfile <- decodeKeyValue '&' <$> decryptECB key adminToken
+    Right adminProfile <-
+      (fmap (decodeKeyValue '&')) <$> decryptECB key adminToken
     adminProfile @?=
       [("email", "XXXXXXXXXXXXX"), ("uid", "10"), ("role", "admin")]
 
@@ -689,11 +694,12 @@ challenge15 =
     unpadPKCS7 "ICE ICE BABY\x05\x05\x05\x05" @?= Left InvalidPaddingError
     unpadPKCS7 "ICE ICE BABY\x01\x02\x03\x04" @?= Left InvalidPaddingError
 
--- Set 3 • Challenge 16 • CBC bitflipping attacks
+-- Set 2 • Challenge 16 • CBC bitflipping attacks
 --------------------------------------------------------------------------------
 isAdmin :: ByteString -> ByteString -> ByteString -> IO Bool
 isAdmin key iv =
-  fmap (elem ("admin", "true") . decodeKeyValue ';') . decryptCBC key iv
+  fmap (either (const False) (elem ("admin", "true") . decodeKeyValue ';')) .
+  decryptCBC key iv
 
 -- Choose userdata so that our plaintext looks like
 --
@@ -725,6 +731,64 @@ challenge16 =
     a <- isAdmin key iv adminToken
     a @?= True
 
+-- Set 3 • Challenge 17 • The CBC padding oracle
+--------------------------------------------------------------------------------
+cbcPaddingOracleAttack :: ByteString -> (ByteString -> IO Bool) -> IO ByteString
+cbcPaddingOracleAttack ciphertext paddingOracle =
+  fmap mconcat . mapM (attackBlock "") . windowsOf 2 . blocksOf 16 $ ciphertext
+  where
+    attackBlock p2 [c1, c2]
+      | B.length p2 == 16 = return p2
+      | otherwise = do
+        putStrLn ""
+        C.putStrLn $
+          p2 <> " [" <> (encodeHex c1) <> ", " <> (encodeHex c2) <> "]"
+        let targetIndex = 15 - B.length p2
+        let paddingByte = fromIntegral $ 16 - targetIndex
+        Just hit <-
+          findM
+            (\b ->
+               let c1' =
+                     B.take targetIndex c1 <>
+                     B.singleton b <>
+                     (p2 .+. B.pack (replicate (B.length p2) paddingByte))
+                in paddingOracle (c1' <> c2))
+            [0 .. 255]
+        let p2' =
+              (hit `xor` paddingByte `xor` (byte targetIndex c1)) `B.cons` p2
+        attackBlock p2' [c1, c2]
+    byte n = (!! n) . B.unpack
+
+challenge17 :: Test
+challenge17 = TestCase . mapM_ (go . decodeBase64) $ secrets
+  where
+    go secret = do
+      key <- randBytes 16
+      iv <- randBytes 16
+      ciphertext <- encryptCBC key iv secret
+      putStrLn ""
+      C.putStrLn $ encodeHex ciphertext
+      brokenSecret <- cbcPaddingOracleAttack ciphertext (paddingOracle key iv)
+      -- TODO this isn't quite right. Unless I'm missing something we can't
+      -- recover the first block. Ah! The attacker should have the IV.
+      brokenSecret @?= secret
+    paddingOracle key iv = fmap isRight . decryptCBC key iv
+    secrets =
+      [ "MDAwMDAwTm93IHRoYXQgdGhlIHBhcnR5IGlzIGp1bXBpbmc="
+      -- , "MDAwMDAxV2l0aCB0aGUgYmFzcyBraWNrZWQgaW" <>
+      --   "4gYW5kIHRoZSBWZWdhJ3MgYXJlIHB1bXBpbic="
+      -- , "MDAwMDAyUXVpY2sgdG8gdGhlIHBvaW50LCB0byB0aGUgcG9pbnQsIG5vIGZha2luZw=="
+      -- , "MDAwMDAzQ29va2luZyBNQydzIGxpa2UgYSBwb3VuZCBvZiBiYWNvbg=="
+      -- , "MDAwMDA0QnVybmluZyAnZW0sIGlmIHlvdSBhaW4ndCBxdWljayBhbmQgbmltYmxl"
+      -- , "MDAwMDA1SSBnbyBjcmF6eSB3aGVuIEkgaGVhciBhIGN5bWJhbA=="
+      -- , "MDAwMDA2QW5kIGEgaGlnaCBoYXQgd2l0aCBhIHNvdXBlZCB1cCB0ZW1wbw=="
+      -- , "MDAwMDA3SSdtIG9uIGEgcm9sbCwgaXQncyB0aW1lIHRvIGdvIHNvbG8="
+      -- , "MDAwMDA4b2xsaW4nIGluIG15IGZpdmUgcG9pbnQgb2g="
+      -- , "MDAwMDA5aXRoIG15IHJhZy10b3AgZG93biBzbyBteSBoYWlyIGNhbiBibG93"
+      ]
+
+-- 0000000Now that the party is jumping
+--                                ^ 32nd byte
 --------------------------------------------------------------------------------
 main :: IO ()
 main =
@@ -750,4 +814,5 @@ main =
     , challenge14
     , challenge15
     , challenge16
+    , challenge17
     ]
