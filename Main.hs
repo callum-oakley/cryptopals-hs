@@ -16,7 +16,7 @@ import           Data.List             (elemIndex, find, maximumBy, minimumBy,
                                         nub, unfoldr)
 import           Data.Maybe            (fromJust, isJust)
 import           Data.Ord              (comparing)
-import           Data.Word             (Word8)
+import           Data.Word             (Word64, Word8, byteSwap64)
 import           OpenSSL.Cipher        (Mode (..), aesCBC, newAESCtx)
 import           OpenSSL.Random        (randBytes)
 import           System.Random         (Random, random, randomIO, randomRIO)
@@ -794,6 +794,34 @@ challenge17 = TestCase . mapM_ (go . decodeBase64) $ secrets
       , "MDAwMDA5aXRoIG15IHJhZy10b3AgZG93biBzbyBteSBoYWlyIGNhbiBibG93"
       ]
 
+-- Set 3 • Challenge 18 • Implement CTR, the stream cipher mode
+--------------------------------------------------------------------------------
+keystream :: ByteString -> Word64 -> Word64 -> IO ByteString
+keystream key nonce counter =
+  blockCipher
+    Encrypt
+    key
+    (B.pack . fmap (collapseBits 8) . chunksOf 8 $
+     explodeBits 64 nonce <> explodeBits 64 (byteSwap64 counter))
+
+encryptCTR :: ByteString -> Word64 -> ByteString -> IO ByteString
+encryptCTR key nonce plaintext =
+  fmap mconcat . sequence $ zipWith f [0 ..] (blocksOf 16 plaintext)
+  where
+    f c block = (block .+.) . B.take (B.length block) <$> keystream key nonce c
+
+challenge18 :: Test
+challenge18 =
+  TestCase $ do
+    plaintext <- encryptCTR "YELLOW SUBMARINE" 0 ciphertext
+    plaintext @?= "Yo, VIP Let's kick it Ice, Ice, baby Ice, Ice, baby "
+    ciphertext' <- encryptCTR "YELLOW SUBMARINE" 0 plaintext
+    ciphertext' @?= ciphertext
+  where
+    ciphertext =
+      decodeBase64
+        "L77na/nrFsKvynd6HzOoG7GHTLXsTVu9qvY/2syLXzhPweyyMTJULu/6/kXX0KSvoOLSFQ=="
+
 --------------------------------------------------------------------------------
 main :: IO ()
 main =
@@ -820,4 +848,5 @@ main =
     , challenge15
     , challenge16
     , challenge17
+    , challenge18
     ]
