@@ -2,7 +2,8 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 import           Control.Applicative   (liftA2)
-import           Control.Monad         (replicateM_, unless, void, when)
+import           Control.Monad         (filterM, replicateM_, unless, void,
+                                        when)
 import           Data.Bits             (Bits, popCount, shiftL, shiftR, testBit,
                                         xor, (.&.))
 import           Data.ByteString       (ByteString)
@@ -100,7 +101,7 @@ a .+. b
   | B.length a >= B.length b = B.pack $ zipWith xor (B.unpack a) (B.unpack b')
   | otherwise = b .+. a
   where
-    b' = (B.pack $ replicate (B.length a - B.length b) 0) <> b
+    b' = B.pack (replicate (B.length a - B.length b) 0) <> b
 
 challenge2 :: Test
 challenge2 =
@@ -160,8 +161,9 @@ challenge4 =
 encryptRepeatingKeyXOR :: ByteString -> ByteString -> ByteString
 encryptRepeatingKeyXOR key plaintext =
   plaintext .+.
-  (B.take (B.length plaintext) $
-   mconcat (replicate (B.length plaintext `div` B.length key + 1) key))
+  B.take
+    (B.length plaintext)
+    (mconcat (replicate (B.length plaintext `div` B.length key + 1) key))
 
 challenge5 :: Test
 challenge5 =
@@ -611,7 +613,7 @@ challenge13 =
              '&'
              [("email", email), ("uid", "10"), ("role", "user")])
     Right adminProfile <-
-      (fmap (decodeKeyValue '&')) <$> decryptECB key adminToken
+      fmap (decodeKeyValue '&') <$> decryptECB key adminToken
     adminProfile @?=
       [("email", "XXXXXXXXXXXXX"), ("uid", "10"), ("role", "admin")]
 
@@ -733,31 +735,39 @@ challenge16 =
 
 -- Set 3 • Challenge 17 • The CBC padding oracle
 --------------------------------------------------------------------------------
-cbcPaddingOracleAttack :: ByteString -> (ByteString -> IO Bool) -> IO ByteString
-cbcPaddingOracleAttack ciphertext paddingOracle =
-  fmap mconcat . mapM (attackBlock "") . windowsOf 2 . blocksOf 16 $ ciphertext
+-- See https://en.wikipedia.org/wiki/Padding_oracle_attack and
+-- https://robertheaton.com/2013/07/29/padding-oracle-attack/
+--
+-- TODO This occasionally seems to hit a worst case scenario where every byte
+-- gives us the correct padding, exploding the search space. It would be nice
+-- to figure out when that happens and why.
+cbcPaddingOracleAttack ::
+     (ByteString -> IO Bool)
+  -> ByteString
+  -> IO (Either InvalidPaddingError ByteString)
+cbcPaddingOracleAttack paddingOracle =
+  fmap (unpadPKCS7 . mconcat) .
+  mapM (\[c1, c2] -> head <$> attackBlock "" c1 c2) . windowsOf 2 . blocksOf 16
   where
-    attackBlock p2 [c1, c2]
-      | B.length p2 == 16 = return p2
+    attackBlock i2 c1 c2
+      | B.length i2 == 16 = return [i2 .+. c1]
       | otherwise = do
-        putStrLn ""
-        C.putStrLn $
-          p2 <> " [" <> (encodeHex c1) <> ", " <> (encodeHex c2) <> "]"
-        let targetIndex = 15 - B.length p2
+        let targetIndex = 15 - B.length i2
         let paddingByte = fromIntegral $ 16 - targetIndex
-        Just hit <-
-          findM
-            (\b ->
+        hits <-
+          filterM
+            (\b -> do
+               noise <- randBytes targetIndex
                let c1' =
-                     B.take targetIndex c1 <>
-                     B.singleton b <>
-                     (p2 .+. B.pack (replicate (B.length p2) paddingByte))
-                in paddingOracle (c1' <> c2))
+                     noise <>
+                     B.singleton b <> (i2 .+. bytes (B.length i2) paddingByte)
+               paddingOracle (c1' <> c2))
             [0 .. 255]
-        let p2' =
-              (hit `xor` paddingByte `xor` (byte targetIndex c1)) `B.cons` p2
-        attackBlock p2' [c1, c2]
-    byte n = (!! n) . B.unpack
+        concat <$>
+          mapM
+            (\hit -> attackBlock ((hit `xor` paddingByte) `B.cons` i2) c1 c2)
+            hits
+    bytes n = B.pack . replicate n
 
 challenge17 :: Test
 challenge17 = TestCase . mapM_ (go . decodeBase64) $ secrets
@@ -766,29 +776,24 @@ challenge17 = TestCase . mapM_ (go . decodeBase64) $ secrets
       key <- randBytes 16
       iv <- randBytes 16
       ciphertext <- encryptCBC key iv secret
-      putStrLn ""
-      C.putStrLn $ encodeHex ciphertext
-      brokenSecret <- cbcPaddingOracleAttack ciphertext (paddingOracle key iv)
-      -- TODO this isn't quite right. Unless I'm missing something we can't
-      -- recover the first block. Ah! The attacker should have the IV.
+      Right brokenSecret <-
+        cbcPaddingOracleAttack (paddingOracle key iv) (iv <> ciphertext)
       brokenSecret @?= secret
     paddingOracle key iv = fmap isRight . decryptCBC key iv
     secrets =
       [ "MDAwMDAwTm93IHRoYXQgdGhlIHBhcnR5IGlzIGp1bXBpbmc="
-      -- , "MDAwMDAxV2l0aCB0aGUgYmFzcyBraWNrZWQgaW" <>
-      --   "4gYW5kIHRoZSBWZWdhJ3MgYXJlIHB1bXBpbic="
-      -- , "MDAwMDAyUXVpY2sgdG8gdGhlIHBvaW50LCB0byB0aGUgcG9pbnQsIG5vIGZha2luZw=="
-      -- , "MDAwMDAzQ29va2luZyBNQydzIGxpa2UgYSBwb3VuZCBvZiBiYWNvbg=="
-      -- , "MDAwMDA0QnVybmluZyAnZW0sIGlmIHlvdSBhaW4ndCBxdWljayBhbmQgbmltYmxl"
-      -- , "MDAwMDA1SSBnbyBjcmF6eSB3aGVuIEkgaGVhciBhIGN5bWJhbA=="
-      -- , "MDAwMDA2QW5kIGEgaGlnaCBoYXQgd2l0aCBhIHNvdXBlZCB1cCB0ZW1wbw=="
-      -- , "MDAwMDA3SSdtIG9uIGEgcm9sbCwgaXQncyB0aW1lIHRvIGdvIHNvbG8="
-      -- , "MDAwMDA4b2xsaW4nIGluIG15IGZpdmUgcG9pbnQgb2g="
-      -- , "MDAwMDA5aXRoIG15IHJhZy10b3AgZG93biBzbyBteSBoYWlyIGNhbiBibG93"
+      , "MDAwMDAxV2l0aCB0aGUgYmFzcyBraWNrZWQgaW" <>
+        "4gYW5kIHRoZSBWZWdhJ3MgYXJlIHB1bXBpbic="
+      , "MDAwMDAyUXVpY2sgdG8gdGhlIHBvaW50LCB0byB0aGUgcG9pbnQsIG5vIGZha2luZw=="
+      , "MDAwMDAzQ29va2luZyBNQydzIGxpa2UgYSBwb3VuZCBvZiBiYWNvbg=="
+      , "MDAwMDA0QnVybmluZyAnZW0sIGlmIHlvdSBhaW4ndCBxdWljayBhbmQgbmltYmxl"
+      , "MDAwMDA1SSBnbyBjcmF6eSB3aGVuIEkgaGVhciBhIGN5bWJhbA=="
+      , "MDAwMDA2QW5kIGEgaGlnaCBoYXQgd2l0aCBhIHNvdXBlZCB1cCB0ZW1wbw=="
+      , "MDAwMDA3SSdtIG9uIGEgcm9sbCwgaXQncyB0aW1lIHRvIGdvIHNvbG8="
+      , "MDAwMDA4b2xsaW4nIGluIG15IGZpdmUgcG9pbnQgb2g="
+      , "MDAwMDA5aXRoIG15IHJhZy10b3AgZG93biBzbyBteSBoYWlyIGNhbiBibG93"
       ]
 
--- 0000000Now that the party is jumping
---                                ^ 32nd byte
 --------------------------------------------------------------------------------
 main :: IO ()
 main =
