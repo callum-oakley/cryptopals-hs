@@ -9,7 +9,8 @@ import           Data.Bits             (Bits, popCount, shiftL, shiftR, testBit,
 import           Data.ByteString       (ByteString)
 import qualified Data.ByteString       as B
 import qualified Data.ByteString.Char8 as C
-import           Data.Char             (digitToInt, intToDigit, ord)
+import           Data.Char             (digitToInt, intToDigit, isAscii,
+                                        toUpper)
 import           Data.Either           (isRight)
 import           Data.Foldable         (foldlM)
 import           Data.List             (elemIndex, find, maximumBy, minimumBy,
@@ -113,10 +114,15 @@ challenge2 =
 
 -- Set 1 • Challenge 3 • Single-byte XOR cipher
 --------------------------------------------------------------------------------
--- Counting spaces is not the most sophisticated scoring method but is good
--- enough here.
-countSpaces :: ByteString -> Int
-countSpaces = length . filter (== (fromIntegral . ord $ ' ')) . B.unpack
+scoreByFreq :: ByteString -> Int
+scoreByFreq = sum . map scoreChar . C.unpack
+  where
+    scoreChar c
+      | isAscii c =
+        case C.elemIndex (toUpper c) " EARIOTNSLCUDPMHGBFYWKVXZJQ" of
+          Just i  -> 100 - i
+          Nothing -> 50
+      | otherwise = -1000
 
 breakSingleByteXOR :: ByteString -> (Word8, ByteString)
 breakSingleByteXOR ciphertext =
@@ -126,7 +132,7 @@ breakSingleByteXOR ciphertext =
       maximumBy
         (comparing
            (\k ->
-              countSpaces $
+              scoreByFreq $
               ciphertext .+. B.pack (replicate (B.length ciphertext) k)))
         [0 .. 255]
 
@@ -145,7 +151,7 @@ challenge3 =
 -- Apply our break to every ciphertext and return the highest scoring.
 detectSingleByteXOR :: [ByteString] -> ByteString
 detectSingleByteXOR =
-  maximumBy (comparing $ countSpaces . snd . breakSingleByteXOR)
+  maximumBy (comparing $ scoreByFreq . snd . breakSingleByteXOR)
 
 challenge4 :: Test
 challenge4 =
@@ -220,9 +226,9 @@ breakRepeatingKeyXOR :: ByteString -> (ByteString, ByteString)
 breakRepeatingKeyXOR ciphertext = (key, plaintext)
   where
     key = B.pack . map fst $ fragments
-    plaintext = mconcat . C.transpose . map snd $ fragments
+    plaintext = mconcat . B.transpose . map snd $ fragments
     fragments =
-      map breakSingleByteXOR . C.transpose . blocksOf keysize $ ciphertext
+      map breakSingleByteXOR . B.transpose . blocksOf keysize $ ciphertext
     keysize = likelyKeysize ciphertext
 
 playThatFunkyMusic :: ByteString
@@ -822,6 +828,115 @@ challenge18 =
       decodeBase64
         "L77na/nrFsKvynd6HzOoG7GHTLXsTVu9qvY/2syLXzhPweyyMTJULu/6/kXX0KSvoOLSFQ=="
 
+-- Set 3 • Challenge 19 • Break fixed-nonce CTR mode using substitutions
+--------------------------------------------------------------------------------
+challenge19 :: Test
+challenge19 =
+  TestCase $ do
+    key <- randBytes 16
+    ciphertexts <- mapM (encryptCTR key 0) secrets
+    -- If we transpose our ciphertexts we end up with a load of ciphertexts
+    -- enrypted with single byte XORs! We know how to deal with them, so we can
+    -- reconstruct the keystream one byte at a time.
+    let brokenKeystream =
+          B.pack . map (fst . breakSingleByteXOR) . B.transpose $ ciphertexts
+    let plaintexts =
+          map (\c -> c .+. B.take (B.length c) brokenKeystream) ciphertexts
+    -- This gets us very close, but the ends of long lines are often jumbled
+    -- due to lack of input data, and the first character of each line
+    -- sometimes comes out as lowercase. We can use context and manual tweaks
+    -- to get the rest of the way, but for the purposes of this test we'll just
+    -- truncate the sample to show it's doing more or less the right thing.
+    map (B.drop 1 . B.take 20) plaintexts @?=
+      map
+        (B.drop 1 . B.take 20)
+        [ "I have met them at close of day"
+        , "Coming with vivid faces"
+        , "From counter or desk among grey"
+        , "Eighteenth-century houses."
+        , "I have passed with a nod of the head"
+        , "Or polite meaningless words,"
+        , "Or have lingered awhile and said"
+        , "Polite meaningless words,"
+        , "And thought before I had done"
+        , "Of a mocking tale or a gibe"
+        , "To please a companion"
+        , "Around the fire at the club,"
+        , "Being certain that they and I"
+        , "But lived where motley is worn:"
+        , "All changed, changed utterly:"
+        , "A terrible beauty is born."
+        , "That woman's days were spent"
+        , "In ignorant good will,"
+        , "Her nights in argument"
+        , "Until her voice grew shrill."
+        , "What voice more sweet than hers"
+        , "When young and beautiful,"
+        , "She rode to harriers?"
+        , "This man had kept a school"
+        , "And rode our winged horse."
+        , "This other his helper and friend"
+        , "Was coming into his force;"
+        , "He might have won fame in the end,"
+        , "So sensitive his nature seemed,"
+        , "So daring and sweet his thought."
+        , "This other man I had dreamed"
+        , "A drunken, vain-glorious lout."
+        , "He had done most bitter wrong"
+        , "To some who are near my heart,"
+        , "Yet I number him in the song;"
+        , "He, too, has resigned his part"
+        , "In the casual comedy;"
+        , "He, too, has been changed in his turn,"
+        , "Transformed utterly:"
+        , "A terrible beauty is born."
+        ]
+  where
+    secrets =
+      map
+        decodeBase64
+        [ "SSBoYXZlIG1ldCB0aGVtIGF0IGNsb3NlIG9mIGRheQ=="
+        , "Q29taW5nIHdpdGggdml2aWQgZmFjZXM="
+        , "RnJvbSBjb3VudGVyIG9yIGRlc2sgYW1vbmcgZ3JleQ=="
+        , "RWlnaHRlZW50aC1jZW50dXJ5IGhvdXNlcy4="
+        , "SSBoYXZlIHBhc3NlZCB3aXRoIGEgbm9kIG9mIHRoZSBoZWFk"
+        , "T3IgcG9saXRlIG1lYW5pbmdsZXNzIHdvcmRzLA=="
+        , "T3IgaGF2ZSBsaW5nZXJlZCBhd2hpbGUgYW5kIHNhaWQ="
+        , "UG9saXRlIG1lYW5pbmdsZXNzIHdvcmRzLA=="
+        , "QW5kIHRob3VnaHQgYmVmb3JlIEkgaGFkIGRvbmU="
+        , "T2YgYSBtb2NraW5nIHRhbGUgb3IgYSBnaWJl"
+        , "VG8gcGxlYXNlIGEgY29tcGFuaW9u"
+        , "QXJvdW5kIHRoZSBmaXJlIGF0IHRoZSBjbHViLA=="
+        , "QmVpbmcgY2VydGFpbiB0aGF0IHRoZXkgYW5kIEk="
+        , "QnV0IGxpdmVkIHdoZXJlIG1vdGxleSBpcyB3b3JuOg=="
+        , "QWxsIGNoYW5nZWQsIGNoYW5nZWQgdXR0ZXJseTo="
+        , "QSB0ZXJyaWJsZSBiZWF1dHkgaXMgYm9ybi4="
+        , "VGhhdCB3b21hbidzIGRheXMgd2VyZSBzcGVudA=="
+        , "SW4gaWdub3JhbnQgZ29vZCB3aWxsLA=="
+        , "SGVyIG5pZ2h0cyBpbiBhcmd1bWVudA=="
+        , "VW50aWwgaGVyIHZvaWNlIGdyZXcgc2hyaWxsLg=="
+        , "V2hhdCB2b2ljZSBtb3JlIHN3ZWV0IHRoYW4gaGVycw=="
+        , "V2hlbiB5b3VuZyBhbmQgYmVhdXRpZnVsLA=="
+        , "U2hlIHJvZGUgdG8gaGFycmllcnM/"
+        , "VGhpcyBtYW4gaGFkIGtlcHQgYSBzY2hvb2w="
+        , "QW5kIHJvZGUgb3VyIHdpbmdlZCBob3JzZS4="
+        , "VGhpcyBvdGhlciBoaXMgaGVscGVyIGFuZCBmcmllbmQ="
+        , "V2FzIGNvbWluZyBpbnRvIGhpcyBmb3JjZTs="
+        , "SGUgbWlnaHQgaGF2ZSB3b24gZmFtZSBpbiB0aGUgZW5kLA=="
+        , "U28gc2Vuc2l0aXZlIGhpcyBuYXR1cmUgc2VlbWVkLA=="
+        , "U28gZGFyaW5nIGFuZCBzd2VldCBoaXMgdGhvdWdodC4="
+        , "VGhpcyBvdGhlciBtYW4gSSBoYWQgZHJlYW1lZA=="
+        , "QSBkcnVua2VuLCB2YWluLWdsb3Jpb3VzIGxvdXQu"
+        , "SGUgaGFkIGRvbmUgbW9zdCBiaXR0ZXIgd3Jvbmc="
+        , "VG8gc29tZSB3aG8gYXJlIG5lYXIgbXkgaGVhcnQs"
+        , "WWV0IEkgbnVtYmVyIGhpbSBpbiB0aGUgc29uZzs="
+        , "SGUsIHRvbywgaGFzIHJlc2lnbmVkIGhpcyBwYXJ0"
+        , "SW4gdGhlIGNhc3VhbCBjb21lZHk7"
+        , "SGUsIHRvbywgaGFzIGJlZW4gY2hhbmdlZCBpbiBoaXMgdHVybiw="
+        , "VHJhbnNmb3JtZWQgdXR0ZXJseTo="
+        , "QSB0ZXJyaWJsZSBiZWF1dHkgaXMgYm9ybi4="
+        ]
+
 --------------------------------------------------------------------------------
 main :: IO ()
 main =
@@ -849,4 +964,5 @@ main =
     , challenge16
     , challenge17
     , challenge18
+    , challenge19
     ]
