@@ -119,7 +119,7 @@ scoreByFreq = sum . map scoreChar . C.unpack
   where
     scoreChar c
       | isAscii c =
-        case C.elemIndex (toUpper c) " EARIOTNSLCUDPMHGBFYWKVXZJQ" of
+        case C.elemIndex (toUpper c) " EARIOTNSLCUDPMHGBFYWKVXZJQ,.'\"-?!/" of
           Just i  -> 100 - i
           Nothing -> 50
       | otherwise = -1000
@@ -760,10 +760,10 @@ cbcPaddingOracleAttack paddingOracle =
       | otherwise = do
         let targetIndex = 15 - B.length i2
         let paddingByte = fromIntegral $ 16 - targetIndex
+        noise <- randBytes targetIndex
         hits <-
           filterM
             (\b -> do
-               noise <- randBytes targetIndex
                let c1' =
                      noise <>
                      B.singleton b <> (i2 .+. bytes (B.length i2) paddingByte)
@@ -903,6 +903,22 @@ challenge19Interactive = do
         , "QSB0ZXJyaWJsZSBiZWF1dHkgaXMgYm9ybi4="
         ]
 
+-- Set 3 • Challenge 20 • Break fixed-nonce CTR statistically
+--------------------------------------------------------------------------------
+challenge20 :: Test
+challenge20 =
+  TestCase $ do
+    key <- randBytes 16
+    plaintexts <- map decodeBase64 . C.lines <$> B.readFile "data/20.txt"
+    ciphertexts <- mapM (encryptCTR key 0) plaintexts
+    let minLen = minimum . map B.length $ ciphertexts
+    let stream =
+          B.pack .
+          map fst . map breakSingleByteXOR . B.transpose . map (B.take minLen) $
+          ciphertexts
+    mapM_ (\(c, p) -> B.take minLen c .+. stream @?= B.take minLen p) $
+      zip ciphertexts plaintexts
+
 --------------------------------------------------------------------------------
 main :: IO ()
 main =
@@ -930,4 +946,5 @@ main =
     , challenge16
     , challenge17
     , challenge18
+    , challenge20
     ]
