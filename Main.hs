@@ -9,7 +9,7 @@ import           Data.Bits             (Bits, popCount, shiftL, shiftR, testBit,
 import           Data.ByteString       (ByteString)
 import qualified Data.ByteString       as B
 import qualified Data.ByteString.Char8 as C
-import           Data.Char             (digitToInt, intToDigit, isAscii,
+import           Data.Char             (digitToInt, intToDigit, isAscii, ord,
                                         toUpper)
 import           Data.Either           (isRight)
 import           Data.Foldable         (foldlM)
@@ -830,68 +830,34 @@ challenge18 =
 
 -- Set 3 • Challenge 19 • Break fixed-nonce CTR mode using substitutions
 --------------------------------------------------------------------------------
-challenge19 :: Test
-challenge19 =
-  TestCase $ do
-    key <- randBytes 16
-    ciphertexts <- mapM (encryptCTR key 0) secrets
-    -- If we transpose our ciphertexts we end up with a load of ciphertexts
-    -- enrypted with single byte XORs! We know how to deal with them, so we can
-    -- reconstruct the keystream one byte at a time.
-    let brokenKeystream =
-          B.pack . map (fst . breakSingleByteXOR) . B.transpose $ ciphertexts
-    let plaintexts =
-          map (\c -> c .+. B.take (B.length c) brokenKeystream) ciphertexts
-    -- This gets us very close, but the ends of long lines are often jumbled
-    -- due to lack of input data, and the first character of each line
-    -- sometimes comes out as lowercase. We can use context and manual tweaks
-    -- to get the rest of the way, but for the purposes of this test we'll just
-    -- truncate the sample to show it's doing more or less the right thing.
-    map (B.drop 1 . B.take 20) plaintexts @?=
-      map
-        (B.drop 1 . B.take 20)
-        [ "I have met them at close of day"
-        , "Coming with vivid faces"
-        , "From counter or desk among grey"
-        , "Eighteenth-century houses."
-        , "I have passed with a nod of the head"
-        , "Or polite meaningless words,"
-        , "Or have lingered awhile and said"
-        , "Polite meaningless words,"
-        , "And thought before I had done"
-        , "Of a mocking tale or a gibe"
-        , "To please a companion"
-        , "Around the fire at the club,"
-        , "Being certain that they and I"
-        , "But lived where motley is worn:"
-        , "All changed, changed utterly:"
-        , "A terrible beauty is born."
-        , "That woman's days were spent"
-        , "In ignorant good will,"
-        , "Her nights in argument"
-        , "Until her voice grew shrill."
-        , "What voice more sweet than hers"
-        , "When young and beautiful,"
-        , "She rode to harriers?"
-        , "This man had kept a school"
-        , "And rode our winged horse."
-        , "This other his helper and friend"
-        , "Was coming into his force;"
-        , "He might have won fame in the end,"
-        , "So sensitive his nature seemed,"
-        , "So daring and sweet his thought."
-        , "This other man I had dreamed"
-        , "A drunken, vain-glorious lout."
-        , "He had done most bitter wrong"
-        , "To some who are near my heart,"
-        , "Yet I number him in the song;"
-        , "He, too, has resigned his part"
-        , "In the casual comedy;"
-        , "He, too, has been changed in his turn,"
-        , "Transformed utterly:"
-        , "A terrible beauty is born."
-        ]
+-- Interactively decrypt by guessing a letter of plaintext at a time.
+challenge19Interactive :: IO ()
+challenge19Interactive = do
+  key <- randBytes 16
+  ciphertexts <- mapM (encryptCTR key 0) secrets
+  go ciphertexts (maximum . map B.length $ ciphertexts) ""
   where
+    go ciphertexts targetStreamLength stream
+      | B.length stream == targetStreamLength =
+        mapM_ (\c -> C.putStrLn $ c .+. B.take (B.length c) stream) ciphertexts
+      | otherwise = do
+        mapM_
+          (\c ->
+             print
+               ( B.take (B.length stream) c .+. B.take (B.length c) stream
+               , if B.length stream < B.length c
+                   then Just $ B.index c (B.length stream)
+                   else Nothing))
+          ciphertexts
+        line <- getLine
+        stream' <-
+          case line of
+            "undo" -> return $ B.take (B.length stream - 1) stream
+            _ -> do
+              let c = read line
+              p <- fromIntegral . ord . head <$> getLine
+              return $ stream `B.snoc` (c `xor` p)
+        go ciphertexts targetStreamLength stream'
     secrets =
       map
         decodeBase64
@@ -964,5 +930,4 @@ main =
     , challenge16
     , challenge17
     , challenge18
-    , challenge19
     ]
