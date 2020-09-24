@@ -6,4 +6,4 @@ build-type: Simple
 executable experiments
   main-is: Main.hs
   ghc-options: -Wall -fno-warn-missing-methods -fno-warn-type-defaults
-  build-depends: base, bytestring, HUnit, HsOpenSSL, random
+  build-depends: base, bytestring, HUnit, HsOpenSSL, random, vector
