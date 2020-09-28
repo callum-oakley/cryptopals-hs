@@ -1,6 +1,7 @@
 {-# LANGUAGE LambdaCase        #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards   #-}
+{-# LANGUAGE TypeApplications  #-}
 
 import           Control.Applicative   (liftA2)
 import           Control.Concurrent    (threadDelay)
@@ -933,20 +934,22 @@ data MT =
     { values :: Vector Word32
     , index  :: Int
     }
-  deriving (Show)
+  deriving (Show, Eq)
+
+temperMT :: Word32 -> Word32
+temperMT =
+  (\y -> y `xor` (y `shiftR` 18)) .
+  (\y -> y `xor` (y `shiftL` 15) .&. 0xefc60000) .
+  (\y -> y `xor` (y `shiftL` 7) .&. 0x9d2c5680) .
+  (\y -> y `xor` (y `shiftR` 11))
 
 -- Implementation as described at https://en.wikipedia.org/wiki/Mersenne_Twister
 instance RandomGen MT where
   next mt@MT {..}
     | index == 624 = next $ mt {values = twist values, index = 0}
     | otherwise =
-      (fromIntegral . temper $ values ! index, mt {index = index + 1})
+      (fromIntegral . temperMT $ values ! index, mt {index = index + 1})
     where
-      temper =
-        (\y -> y `xor` (y `shiftR` 18)) .
-        (\y -> y `xor` (y `shiftL` 15) .&. 0xefc60000) .
-        (\y -> y `xor` (y `shiftL` 7) .&. 0x9d2c5680) .
-        (\y -> y `xor` (y `shiftR` 11))
       twist vs =
         V.generate
           624
@@ -1009,6 +1012,42 @@ challenge22 =
     ts <- round . (* 1e6) . nominalDiffTimeToSeconds <$> getPOSIXTime
     find ((== r) . fst . random . initMT) [ts,ts - 1 ..] @?= Just secretSeed
 
+-- Set 3 • Challenge 23 • Clone an MT19937 RNG from its output
+--------------------------------------------------------------------------------
+-- https://shainer.github.io/crypto/python/matasano/random/2016/10/27/mersenne-twister-p2.html
+untemperMT :: Word32 -> Word32
+untemperMT =
+  invert shiftR 11 0xffffffff .
+  invert shiftL 7 0x9d2c5680 .
+  invert shiftL 15 0xefc60000 . invert shiftR 18 0xffffffff
+  where
+    invert shift n mask y =
+      iterate (\x -> y `xor` ((x `shift` n) .&. mask)) y !! (32 `div` n)
+
+testUntemperMT :: Test
+testUntemperMT =
+  TestCase . replicateM_ 100 $ do
+    r <- randomIO
+    untemperMT (temperMT r) @?= r
+
+-- Hide the MT behind RandomGen so that we don't have access to its internals.
+cloneMT :: RandomGen g => g -> (MT, g)
+cloneMT g =
+  ( MT {values = V.fromList . map untemperMT $ take 624 samples, index = 624}
+  , g')
+  where
+    rs = take 624 . iterate (random . snd) $ random g
+    samples = map fst rs
+    g' = snd $ last rs
+
+challenge23 :: Test
+challenge23 =
+  TestCase $ do
+    mt <- initMT <$> randomIO
+    let (clone, mt') = cloneMT mt
+    clone @?= mt'
+    take 100 (randoms @Word32 clone) @?= take 100 (randoms mt')
+
 --------------------------------------------------------------------------------
 main :: IO ()
 main =
@@ -1018,25 +1057,27 @@ main =
     , testHammingDistance
     , testKeyValue
     , testDetectPrefixLength
-    -- , challenge1
-    -- , challenge2
-    -- , challenge3
-    -- , challenge4
-    -- , challenge5
-    -- , challenge6
-    -- , challenge7
-    -- , challenge8
-    -- , challenge9
-    -- , challenge10
-    -- , challenge11
-    -- , challenge12
-    -- , challenge13
-    -- , challenge14
-    -- , challenge15
-    -- , challenge16
-    -- , challenge17
-    -- , challenge18
-    -- , challenge20
+    , testUntemperMT
+    , challenge1
+    , challenge2
+    , challenge3
+    , challenge4
+    , challenge5
+    , challenge6
+    , challenge7
+    , challenge8
+    , challenge9
+    , challenge10
+    , challenge11
+    , challenge12
+    , challenge13
+    , challenge14
+    , challenge15
+    , challenge16
+    , challenge17
+    , challenge18
+    , challenge20
     , challenge21
     , challenge22
+    , challenge23
     ]
