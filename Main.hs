@@ -24,7 +24,8 @@ import           Data.Time.Clock       (nominalDiffTimeToSeconds)
 import           Data.Time.Clock.POSIX (getPOSIXTime)
 import           Data.Vector           (Vector, (!))
 import qualified Data.Vector           as V
-import           Data.Word             (Word32, Word64, Word8, byteSwap64)
+import           Data.Word             (Word16, Word32, Word64, Word8,
+                                        byteSwap64)
 import           OpenSSL.Cipher        (Mode (..), aesCBC, newAESCtx)
 import           OpenSSL.Random        (randBytes)
 import           System.Random         (Random, RandomGen (..), random,
@@ -1048,6 +1049,54 @@ challenge23 =
     clone @?= mt'
     take 100 (randoms @Word32 clone) @?= take 100 (randoms mt')
 
+-- Set 3 • Challenge 24 • Create the MT19937 stream cipher and break it
+--------------------------------------------------------------------------------
+encryptMTS :: Word32 -> ByteString -> ByteString
+encryptMTS seed = B.pack . zipWith xor (randoms $ initMT seed) . B.unpack
+
+-- There are only 65536 possible Word16 seeds, so let's just try them all.
+breakMTS16BitSeed :: ByteString -> ByteString -> Maybe Word16
+breakMTS16BitSeed knownSuffix ciphertext =
+  fromIntegral <$> find match [0 .. 65535]
+  where
+    pad = B.replicate (B.length ciphertext - B.length knownSuffix) 0
+    match seed =
+      B.drop (B.length pad) ciphertext ==
+      B.drop (B.length pad) (encryptMTS seed $ pad <> knownSuffix)
+
+-- Assumes we know some suffix of the plaintext as above. We can't try all
+-- Word32s, but we can try counting back from the current timestamp for a while
+-- to see if we get lucky.
+breakMTSTimeSeed :: ByteString -> ByteString -> Word32 -> Maybe Word32
+breakMTSTimeSeed knownSuffix ciphertext ts =
+  find match [ts,ts - 1 .. ts - 65535]
+  where
+    pad = B.replicate (B.length ciphertext - B.length knownSuffix) 0
+    match seed =
+      B.drop (B.length pad) ciphertext ==
+      B.drop (B.length pad) (encryptMTS seed $ pad <> knownSuffix)
+
+challenge24 :: Test
+challenge24 = TestCase $ part1 >> part2
+  where
+    part1 = do
+      let knownSuffix = C.replicate 14 'A'
+      unknownPrefix <- randBytes =<< randomRIO (0, 15)
+      seed <- randomIO @Word16
+      let ciphertext =
+            encryptMTS (fromIntegral seed) (unknownPrefix <> knownSuffix)
+      let brokenSeed = breakMTS16BitSeed knownSuffix ciphertext
+      brokenSeed @?= Just seed
+    part2 = do
+      let knownSuffix = "hello@callumoakley.net" -- could be a username for example
+      unknownPrefix <- randBytes =<< randomRIO (0, 15)
+      seed <- round . (* 1e6) . nominalDiffTimeToSeconds <$> getPOSIXTime
+      let token = encryptMTS seed (unknownPrefix <> knownSuffix)
+      threadDelay =<< randomRIO (40, 1000)
+      ts <- round . (* 1e6) . nominalDiffTimeToSeconds <$> getPOSIXTime
+      let brokenSeed = breakMTSTimeSeed knownSuffix token ts
+      brokenSeed @?= Just seed
+
 --------------------------------------------------------------------------------
 main :: IO ()
 main =
@@ -1080,4 +1129,5 @@ main =
     , challenge21
     , challenge22
     , challenge23
+    , challenge24
     ]
